@@ -1,24 +1,23 @@
 """Unittest module for media downloader."""
-import os
+import asyncio
 import copy
-import logging
+import os
 import platform
 import unittest
+from datetime import datetime
 
-import asyncio
 import mock
 import pyrogram
-import pytest
 
 from media_downloader import (
-    _get_media_meta,
     _can_download,
+    _get_media_meta,
     _is_exist,
-    download_media,
-    update_config,
     begin_import,
-    process_messages,
+    download_media,
     main,
+    process_messages,
+    update_config,
 )
 
 MOCK_DIR: str = "/root/project"
@@ -29,7 +28,7 @@ MOCK_CONF = {
     "api_hash": "hasw5Tgawsuj67",
     "last_read_message_id": 0,
     "chat_id": 8654123,
-    "ids_to_retry": [],
+    "ids_to_retry": [1],
     "media_types": ["audio", "voice"],
     "file_formats": {"audio": ["all"], "voice": ["all"]},
 }
@@ -53,13 +52,14 @@ class Chat:
 
 class MockMessage:
     def __init__(self, **kwargs):
-        self.message_id = kwargs.get("id")
+        self.id = kwargs.get("id")
         self.media = kwargs.get("media")
         self.audio = kwargs.get("audio", None)
         self.document = kwargs.get("document", None)
         self.photo = kwargs.get("photo", None)
         self.video = kwargs.get("video", None)
         self.voice = kwargs.get("voice", None)
+        self.video_note = kwargs.get("video_note", None)
         self.chat = Chat(kwargs.get("chat_id", None))
 
 
@@ -89,6 +89,12 @@ class MockVoice:
 class MockVideo:
     def __init__(self, **kwargs):
         self.mime_type = kwargs["mime_type"]
+
+
+class MockVideoNote:
+    def __init__(self, **kwargs):
+        self.mime_type = kwargs["mime_type"]
+        self.date = kwargs["date"]
 
 
 class MockEventLoop:
@@ -127,9 +133,7 @@ async def mock_process_message(*args, **kwargs):
 
 
 async def async_process_messages(client, messages, media_types, file_formats):
-    result = await process_messages(
-        client, messages, media_types, file_formats
-    )
+    result = await process_messages(client, messages, media_types, file_formats)
     return result
 
 
@@ -146,14 +150,14 @@ class MockClient:
     async def stop(self):
         pass
 
-    async def iter_history(self, *args, **kwargs):
+    async def get_chat_history(self, *args, **kwargs):
         items = [
             MockMessage(
                 id=1213,
                 media=True,
                 voice=MockVoice(
                     mime_type="audio/ogg",
-                    date=1564066430,
+                    date=datetime(2019, 7, 25, 14, 53, 50),
                 ),
             ),
             MockMessage(
@@ -196,15 +200,27 @@ class MockClient:
                     mime_type="video/mov",
                 ),
             )
+        elif kwargs["message_ids"] == [1]:
+            message = [
+                MockMessage(
+                    id=1,
+                    media=True,
+                    chat_id=234568,
+                    video=MockVideo(
+                        file_name="sample_video.mov",
+                        mime_type="video/mov",
+                    ),
+                )
+            ]
         return message
 
     async def download_media(self, *args, **kwargs):
         mock_message = args[0]
-        if mock_message.message_id in [7, 8]:
+        if mock_message.id in [7, 8]:
             raise pyrogram.errors.exceptions.bad_request_400.BadRequest
-        elif mock_message.message_id == 9:
+        elif mock_message.id == 9:
             raise pyrogram.errors.exceptions.unauthorized_401.Unauthorized
-        elif mock_message.message_id == 11:
+        elif mock_message.id == 11:
             raise TypeError
         return kwargs["file_name"]
 
@@ -222,7 +238,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
             media=True,
             voice=MockVoice(
                 mime_type="audio/ogg",
-                date=1564066430,
+                date=datetime(2019, 7, 25, 14, 53, 50),
             ),
         )
         result = self.loop.run_until_complete(
@@ -243,7 +259,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
         message = MockMessage(
             id=2,
             media=True,
-            photo=MockPhoto(date=1565015712),
+            photo=MockPhoto(date=datetime(2019, 8, 5, 14, 35, 12)),
         )
         result = self.loop.run_until_complete(
             async_get_media_meta(message.photo, "photo")
@@ -270,9 +286,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
         )
         self.assertEqual(
             (
-                platform_generic_path(
-                    "/root/project/document/sample_document.pdf"
-                ),
+                platform_generic_path("/root/project/document/sample_document.pdf"),
                 "pdf",
             ),
             result,
@@ -312,6 +326,28 @@ class MediaDownloaderTestCase(unittest.TestCase):
         self.assertEqual(
             (
                 platform_generic_path("/root/project/video/"),
+                "mp4",
+            ),
+            result,
+        )
+
+        # Test VideoNote
+        message = MockMessage(
+            id=6,
+            media=True,
+            video_note=MockVideoNote(
+                mime_type="video/mp4",
+                date=datetime(2019, 7, 25, 14, 53, 50),
+            ),
+        )
+        result = self.loop.run_until_complete(
+            async_get_media_meta(message.video_note, "video_note")
+        )
+        self.assertEqual(
+            (
+                platform_generic_path(
+                    "/root/project/video_note/video_note_2019-07-25T14:53:50.mp4"
+                ),
                 "mp4",
             ),
             result,
@@ -454,9 +490,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
         }
         update_config(conf)
         mock_open.assert_called_with("config.yaml", "w")
-        mock_yaml.dump.assert_called_with(
-            conf, mock.ANY, default_flow_style=False
-        )
+        mock_yaml.dump.assert_called_with(conf, mock.ANY, default_flow_style=False)
 
     @mock.patch("media_downloader.update_config")
     @mock.patch("media_downloader.pyrogram.Client", new=MockClient)
@@ -478,7 +512,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
                         media=True,
                         voice=MockVoice(
                             mime_type="audio/ogg",
-                            date=1564066340,
+                            date=datetime(2019, 7, 25, 14, 53, 50),
                         ),
                     ),
                     MockMessage(
@@ -519,7 +553,7 @@ class MediaDownloaderTestCase(unittest.TestCase):
                         media=True,
                         voice=MockVoice(
                             mime_type="audio/ogg",
-                            date=1564066340,
+                            date=datetime(2019, 7, 25, 14, 53, 50),
                         ),
                     ),
                     MockMessage(
